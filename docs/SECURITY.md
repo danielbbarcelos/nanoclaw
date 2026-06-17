@@ -125,6 +125,54 @@ pip, curl, node/bun with the proxy env) are unaffected. Any workflow that relies
 on a **non-proxy-aware** tool reaching the internet directly will fail by design.
 Lockdown is **off by default**; opt in with `NANOCLAW_EGRESS_LOCKDOWN=true`.
 
+### 7. Resource Limits & Container Hardening
+
+A prompt-injected or runaway agent has a full shell inside its container by
+design (the container is the trust boundary). These spawn-time limits bound the
+blast radius so one hostile session can't take the **host** down (fork bomb,
+memory balloon, disk/PID exhaustion) or escalate after a runtime escape. Applied
+in `buildContainerArgs` (`src/container-runner.ts`).
+
+| Env | Default | Flag | Meaning |
+| --- | --- | --- | --- |
+| `NANOCLAW_CONTAINER_NO_NEW_PRIVILEGES` | `true` | `--security-opt no-new-privileges` | Blocks setuid privilege escalation inside the container. Set `false` to drop. |
+| `NANOCLAW_CONTAINER_MEMORY` | `4g` | `--memory` / `--memory-swap` | Hard memory ceiling (swap disabled). `''`/`off` removes the limit. |
+| `NANOCLAW_CONTAINER_PIDS` | `1024` | `--pids-limit` | Caps processes/threads — defangs fork bombs. `''`/`off` removes. |
+| `NANOCLAW_CONTAINER_CPUS` | _(unset)_ | `--cpus` | Opt-in CPU quota (e.g. `2`). Off by default — `--pids-limit` already bounds fork bombs and a quota can slow legitimate work. |
+
+Tune limits up for heavy browser/build workloads; the defaults target normal
+coding and agent-browser use.
+
+### 8. Backups & Durability
+
+`data/v2.db` is the **sole** store of identity, roles, and wiring, and it's
+gitignored — losing it means re-running setup and re-wiring every channel. Two
+mechanisms protect it (`src/db/backup.ts`):
+
+- **Pre-migration snapshot** — `runMigrations` writes a `VACUUM INTO` snapshot
+  before applying any pending migration (some migrations recreate tables and
+  none have a reverse, so this is the recovery path for a bad upgrade).
+- **Periodic snapshot** — a daily timer (`startDbBackupTimer`) snapshots the
+  live DB. `VACUUM INTO` is consistent under concurrent writes and folds in WAL
+  frames, so there's no `-wal`/`-shm` sidecar to copy.
+
+Snapshots land in `data/backups/<name>.<label>-<ts>.bak`, pruned to the most
+recent `NANOCLAW_DB_BACKUP_KEEP` (default 14).
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `NANOCLAW_DB_BACKUP_KEEP` | `14` | Snapshots retained per source DB. |
+| `NANOCLAW_DB_BACKUP_INTERVAL_HOURS` | `24` | Periodic backup cadence; `0` disables the timer. |
+
+**Manual backup:** `pnpm exec tsx scripts/backup-db.ts` (safe while the host is
+running). **Restore:** stop NanoClaw, remove any `data/v2.db-wal`/`-shm`, then
+`cp data/backups/v2.db.<...>.bak data/v2.db`.
+
+On graceful shutdown the host closes the central DB so better-sqlite3
+checkpoints the WAL back into `v2.db` (otherwise the latest writes can linger
+only in `v2.db-wal`). Session DBs run `journal_mode=DELETE` with an explicit
+`synchronous=FULL` so a power loss can't corrupt in-flight messages.
+
 ## Privilege Comparison
 
 | Capability | Main Group | Non-Main Group |

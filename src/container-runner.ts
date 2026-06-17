@@ -423,6 +423,46 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
+/** Read a resource-limit env override; '' or 'off' disables that flag. */
+function limitEnv(name: string, fallback: string): string | null {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  const trimmed = v.trim();
+  if (trimmed === '' || trimmed.toLowerCase() === 'off') return null;
+  return trimmed;
+}
+
+/**
+ * Docker hardening + resource-limit flags for an agent container.
+ *
+ * Defaults bound a runaway/hostile agent without breaking normal coding or
+ * browser work; operators tune via env. `--cpus` is opt-in (a CPU quota can
+ * slow legitimate work, and `--pids-limit` already defangs fork bombs) — set
+ * NANOCLAW_CONTAINER_CPUS to enable it.
+ */
+function containerHardeningArgs(): string[] {
+  const out: string[] = [];
+
+  // Block setuid-based privilege escalation inside the container (pure upside).
+  if (process.env.NANOCLAW_CONTAINER_NO_NEW_PRIVILEGES !== 'false') {
+    out.push('--security-opt', 'no-new-privileges');
+  }
+
+  const mem = limitEnv('NANOCLAW_CONTAINER_MEMORY', '4g');
+  if (mem) {
+    // memory-swap == memory disables swap, so the cap is a hard ceiling.
+    out.push('--memory', mem, '--memory-swap', mem);
+  }
+
+  const pids = limitEnv('NANOCLAW_CONTAINER_PIDS', '1024');
+  if (pids) out.push('--pids-limit', pids);
+
+  const cpus = limitEnv('NANOCLAW_CONTAINER_CPUS', ''); // opt-in
+  if (cpus) out.push('--cpus', cpus);
+
+  return out;
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -433,6 +473,12 @@ async function buildContainerArgs(
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+
+  // Hardening + resource limits — bound the blast radius of a prompt-injected
+  // or runaway agent (fork bomb, memory balloon, disk fill) and block setuid
+  // privilege escalation after any container escape. All limits are
+  // env-overridable; set a var to '' (or 'off') to drop that specific flag.
+  args.push(...containerHardeningArgs());
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
