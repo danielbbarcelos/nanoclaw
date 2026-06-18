@@ -10,7 +10,8 @@ import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
-import { initDb } from './db/connection.js';
+import { initDb, closeDb } from './db/connection.js';
+import { startDbBackupTimer, stopDbBackupTimer } from './db/backup.js';
 import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
@@ -171,6 +172,10 @@ async function main(): Promise<void> {
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
+  // 8. Periodic backups of the central DB (identity/roles/wiring). Daily by
+  // default; see src/db/backup.ts for env overrides.
+  startDbBackupTimer();
+
   log.info('NanoClaw running');
 }
 
@@ -186,10 +191,19 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  stopDbBackupTimer();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
   } finally {
+    // Close the central DB so better-sqlite3 checkpoints the WAL back into
+    // v2.db — otherwise the latest roles/wiring can linger only in v2.db-wal,
+    // and a bare-file copy/move would lose them. Best-effort; never block exit.
+    try {
+      closeDb();
+    } catch (err) {
+      log.error('Failed to close central DB on shutdown', { err });
+    }
     // Always reset on graceful shutdown — even if teardown threw, we got here
     // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
     // as one.

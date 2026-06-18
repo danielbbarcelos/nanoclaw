@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 
 import { log } from '../../log.js';
+import { backupSqlite } from '../backup.js';
 import { migration001 } from './001-initial.js';
 import { migration002 } from './002-chat-sdk-state.js';
 import { moduleAgentToAgentDestinations } from './module-agent-to-agent-destinations.js';
@@ -84,6 +85,17 @@ export function runMigrations(db: Database.Database, list: Migration[] = migrati
   if (pending.length === 0) return;
 
   log.info('Running migrations', { count: pending.length });
+
+  // Snapshot the DB before mutating schema. Migrations 010/016 recreate tables
+  // (a stale column list silently drops data) and none have a reverse, so this
+  // is the only recovery path for a bad upgrade. Best-effort: a failed backup
+  // (e.g. disk full) warns but doesn't block startup — blocking would risk a
+  // crash-loop, and the failure surfaces in the error log.
+  try {
+    backupSqlite(db, 'pre-migration');
+  } catch (err) {
+    log.warn('Pre-migration backup failed (continuing with migration)', { err });
+  }
 
   for (const m of pending) {
     // Table recreates need FK enforcement off for the DROP+RENAME window.

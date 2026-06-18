@@ -13,6 +13,10 @@ import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 export function ensureSchema(dbPath: string, schema: 'inbound' | 'outbound'): void {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
+  // DELETE journaling is only crash-safe with synchronous=FULL (NORMAL is
+  // durable for WAL but can corrupt a rollback-journal DB on power loss). Set
+  // it explicitly so durability never depends on SQLite's compile-time default.
+  db.pragma('synchronous = FULL');
   db.exec(schema === 'inbound' ? INBOUND_SCHEMA : OUTBOUND_SCHEMA);
   db.close();
 }
@@ -21,6 +25,7 @@ export function ensureSchema(dbPath: string, schema: 'inbound' | 'outbound'): vo
 export function openInboundDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
+  db.pragma('synchronous = FULL');
   db.pragma('busy_timeout = 5000');
   return db;
 }
@@ -36,6 +41,7 @@ export function openOutboundDb(dbPath: string): Database.Database {
 export function openOutboundDbRw(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
+  db.pragma('synchronous = FULL');
   db.pragma('busy_timeout = 5000');
   return db;
 }

@@ -76,6 +76,10 @@ export function getOutboundDb(): Database {
   if (!_outbound) {
     _outbound = new Database(DEFAULT_OUTBOUND_PATH);
     _outbound.exec('PRAGMA journal_mode = DELETE');
+    // DELETE journaling needs synchronous=FULL to survive a power loss / OS
+    // crash without corrupting the agent's unflushed responses. Set explicitly
+    // so durability doesn't ride on the SQLite compile-time default.
+    _outbound.exec('PRAGMA synchronous = FULL');
     _outbound.exec('PRAGMA busy_timeout = 5000');
     _outbound.exec('PRAGMA foreign_keys = ON');
     // Lightweight forward-compat: session_state was added after the initial
