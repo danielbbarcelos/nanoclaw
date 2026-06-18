@@ -248,6 +248,64 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
 }
 
 // ---------------------------------------------------------------------------
+// Retention (prune old message history to bound disk + data exposure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Delete terminal inbound history older than `cutoffIso` from a host-owned
+ * inbound.db. Only 'completed'/'failed' rows are removed — 'pending'/'paused'
+ * rows (including scheduled/recurring tasks awaiting their next run) are kept,
+ * so retention never drops live work. Comparison uses SQLite datetime() because
+ * timestamps come in mixed formats (ISO from messages, 'YYYY-MM-DD HH:MM:SS'
+ * from datetime('now')).
+ *
+ * Does NOT touch the `delivered` table — see pruneDeliveredTable for why that
+ * may only run when the container is stopped.
+ */
+export function pruneInboundMessages(db: Database.Database, cutoffIso: string): { messages: number } {
+  const messages = db
+    .prepare("DELETE FROM messages_in WHERE status IN ('completed', 'failed') AND datetime(timestamp) < datetime(?)")
+    .run(cutoffIso).changes;
+  return { messages };
+}
+
+/**
+ * Delete old delivery-tracking rows from the host-owned inbound.db.
+ *
+ * `delivered` is the dedup ledger the delivery loop consults to skip
+ * already-sent messages_out (src/delivery.ts). Pruning a `delivered` row while
+ * its messages_out row still exists would make the delivery loop RE-SEND that
+ * message. So this is only safe to call together with pruneOutboundMessages —
+ * i.e. when the container is stopped. Because delivered_at >= the matching
+ * messages_out.timestamp, the same cutoff that drops a `delivered` row also
+ * drops its messages_out row, keeping the two consistent (no re-delivery).
+ */
+export function pruneDeliveredTable(db: Database.Database, cutoffIso: string): number {
+  return db.prepare('DELETE FROM delivered WHERE datetime(delivered_at) < datetime(?)').run(cutoffIso).changes;
+}
+
+/**
+ * Delete old outbound history older than `cutoffIso` from a container-owned
+ * outbound.db. ONLY safe to call when no container is running (single-writer
+ * invariant) — same rule as deleteOrphanProcessingClaims. Keeps anything still
+ * scheduled for future delivery (deliver_after) and any in-flight 'processing'
+ * ack.
+ */
+export function pruneOutboundMessages(db: Database.Database, cutoffIso: string): { messages: number; acks: number } {
+  const messages = db
+    .prepare(
+      `DELETE FROM messages_out
+        WHERE datetime(timestamp) < datetime(?)
+          AND (deliver_after IS NULL OR datetime(deliver_after) < datetime(?))`,
+    )
+    .run(cutoffIso, cutoffIso).changes;
+  const acks = db
+    .prepare("DELETE FROM processing_ack WHERE status != 'processing' AND datetime(status_changed) < datetime(?)")
+    .run(cutoffIso).changes;
+  return { messages, acks };
+}
+
+// ---------------------------------------------------------------------------
 // messages_out (read-only from host)
 // ---------------------------------------------------------------------------
 
