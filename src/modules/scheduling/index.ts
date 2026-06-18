@@ -19,6 +19,7 @@
  * module piggybacks on the core schema.
  */
 import { registerDeliveryAction } from '../../delivery.js';
+import { registerApprovalHandler } from '../approvals/index.js';
 import {
   handleCancelTask,
   handlePauseTask,
@@ -26,9 +27,13 @@ import {
   handleScheduleTask,
   handleUpdateTask,
 } from './actions.js';
+import { applyTaskScript } from './apply.js';
 
 registerDeliveryAction('schedule_task', handleScheduleTask);
 registerDeliveryAction('cancel_task', handleCancelTask);
 registerDeliveryAction('pause_task', handlePauseTask);
 registerDeliveryAction('resume_task', handleResumeTask);
 registerDeliveryAction('update_task', handleUpdateTask);
+
+// Approval handler for the script-gated schedule_task / update_task path.
+registerApprovalHandler('schedule_task_script', applyTaskScript);

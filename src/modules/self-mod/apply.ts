@@ -18,6 +18,7 @@ import type { McpServerConfig } from '../../container-config.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { ApprovalHandler } from '../approvals/index.js';
+import { validateMcpServer, validatePackages } from './validate.js';
 
 export const applyInstallPackages: ApprovalHandler = async ({ session, payload, userId, notify }) => {
   const agentGroup = getAgentGroup(session.agent_group_id);
@@ -29,6 +30,17 @@ export const applyInstallPackages: ApprovalHandler = async ({ session, payload, 
   const configRow = getContainerConfig(agentGroup.id);
   if (!configRow) {
     notify('install_packages approved but container config missing.');
+    return;
+  }
+
+  // Defense-in-depth: re-validate the stored payload before it reaches shell
+  // exec — never trust that the pending_approvals row passed request-side checks.
+  const apt = (payload.apt as string[] | undefined) || [];
+  const npm = (payload.npm as string[] | undefined) || [];
+  const valid = validatePackages(apt, npm);
+  if (!valid.ok) {
+    notify(`install_packages rejected at apply: ${valid.error}`);
+    log.warn('install_packages: rejected at apply', { agentGroupId: agentGroup.id, error: valid.error });
     return;
   }
 
@@ -92,6 +104,15 @@ export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, use
   const configRow = getContainerConfig(agentGroup.id);
   if (!configRow) {
     notify('add_mcp_server approved but container config missing.');
+    return;
+  }
+
+  // Defense-in-depth: re-validate before the name/command land in the config
+  // that spawns the MCP process — never trust the stored payload verbatim.
+  const valid = validateMcpServer(payload.name, payload.command, payload.args);
+  if (!valid.ok) {
+    notify(`add_mcp_server rejected at apply: ${valid.error}`);
+    log.warn('add_mcp_server: rejected at apply', { agentGroupId: agentGroup.id, error: valid.error });
     return;
   }
 
