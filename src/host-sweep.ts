@@ -39,12 +39,22 @@ import {
   getMessageForRetry,
   getProcessingClaims,
   markMessageFailed,
+  pruneDeliveredTable,
+  pruneInboundMessages,
+  pruneOutboundMessages,
   retryWithBackoff,
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
 import { log } from './log.js';
-import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
+import {
+  openInboundDb,
+  openOutboundDb,
+  openOutboundDbRw,
+  inboundDbPath,
+  outboundDbPath,
+  heartbeatPath,
+} from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
 
@@ -152,7 +162,83 @@ async function sweep(): Promise<void> {
     log.error('Host sweep error', { err });
   }
 
+  try {
+    runRetentionSweep();
+  } catch (err) {
+    log.error('Retention sweep error', { err });
+  }
+
   setTimeout(sweep, SWEEP_INTERVAL_MS);
+}
+
+// ── Message retention ──
+// Bound disk growth and limit how long chat history (incl. personal data)
+// lingers in the session DBs. Off when NANOCLAW_MESSAGE_RETENTION_DAYS<=0;
+// runs at most once a day. Inbound is host-owned so it's always safe to prune;
+// outbound is container-owned, so we only prune it for sessions whose container
+// is stopped (single-writer invariant — same rule the sweep follows elsewhere).
+const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_RETENTION_DAYS = 90;
+let lastRetentionMs = 0;
+
+/** Reset the daily gate — test seam only. */
+export function resetRetentionGate(): void {
+  lastRetentionMs = 0;
+}
+
+export function runRetentionSweep(now: number = Date.now()): void {
+  const days = parseInt(process.env.NANOCLAW_MESSAGE_RETENTION_DAYS || String(DEFAULT_RETENTION_DAYS), 10);
+  if (!Number.isFinite(days) || days <= 0) return;
+  if (lastRetentionMs !== 0 && now - lastRetentionMs < RETENTION_INTERVAL_MS) return;
+  lastRetentionMs = now;
+
+  const cutoff = new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+  let prunedIn = 0;
+  let prunedOut = 0;
+
+  for (const session of getActiveSessions()) {
+    const agentGroup = getAgentGroup(session.agent_group_id);
+    if (!agentGroup) continue;
+
+    // `delivered` (dedup ledger) and `messages_out` must be pruned together,
+    // and only when the container is stopped — pruning `delivered` while a
+    // messages_out row survives would make the delivery loop re-send it.
+    const stopped = !isContainerRunning(session.id);
+
+    if (fs.existsSync(inboundDbPath(agentGroup.id, session.id))) {
+      try {
+        const inDb = openInboundDb(agentGroup.id, session.id);
+        try {
+          prunedIn += pruneInboundMessages(inDb, cutoff).messages;
+          if (stopped) prunedIn += pruneDeliveredTable(inDb, cutoff);
+        } finally {
+          inDb.close();
+        }
+      } catch (err) {
+        log.warn('Retention: inbound prune failed', { sessionId: session.id, err });
+      }
+    }
+
+    // Outbound is container-owned — only touch it when nothing is running, and
+    // never create the file (open RW would); skip if it doesn't exist yet.
+    if (stopped && fs.existsSync(outboundDbPath(agentGroup.id, session.id))) {
+      try {
+        const outDb = openOutboundDbRw(agentGroup.id, session.id);
+        try {
+          const r = pruneOutboundMessages(outDb, cutoff);
+          prunedOut += r.messages + r.acks;
+        } finally {
+          outDb.close();
+        }
+      } catch (err) {
+        log.warn('Retention: outbound prune failed', { sessionId: session.id, err });
+      }
+    }
+  }
+
+  if (prunedIn > 0 || prunedOut > 0) {
+    log.info('Retention sweep pruned old messages', { cutoffBefore: cutoff, days, prunedIn, prunedOut });
+  }
 }
 
 async function sweepSession(session: Session): Promise<void> {
