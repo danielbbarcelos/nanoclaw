@@ -10,15 +10,22 @@
 import type Database from 'better-sqlite3';
 
 import { wakeContainer } from '../../container-runner.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
+import { notifyAgent, requestApproval } from '../approvals/index.js';
 import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpdate } from './db.js';
+
+/** A non-empty string we treat as a real pre-agent script (needs approval). */
+function hasScript(script: unknown): script is string {
+  return typeof script === 'string' && script.trim() !== '';
+}
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
@@ -26,6 +33,40 @@ export async function handleScheduleTask(
   const script = content.script as string | null;
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
+
+  // Security: a task carrying a shell script runs in the container before the
+  // agent (applyPreTaskScripts) — an arbitrary-code/persistence vector. Gate it
+  // behind admin approval so a prompt-injected agent can't self-schedule it.
+  if (hasScript(script)) {
+    const agentGroup = getAgentGroup(session.agent_group_id);
+    if (!agentGroup) {
+      notifyAgent(session, 'schedule_task failed: agent group not found.');
+      return;
+    }
+    await requestApproval({
+      session,
+      agentName: agentGroup.name,
+      action: 'schedule_task_script',
+      payload: {
+        op: 'schedule',
+        taskId,
+        prompt,
+        script,
+        processAfter,
+        recurrence,
+        platformId: (content.platformId as string) ?? null,
+        channelType: (content.channelType as string) ?? null,
+        threadId: (content.threadId as string) ?? null,
+      },
+      title: 'Scheduled Script Approval',
+      question: `Agent "${agentGroup.name}" wants to schedule a task that runs a shell script before the agent:\n\n${script.slice(0, 500)}`,
+    });
+    notifyAgent(
+      session,
+      'schedule_task: the task includes a shell script, so it needs admin approval before it will run. An approval request was sent.',
+    );
+    return;
+  }
 
   insertTask(inDb, {
     id: taskId,
@@ -84,6 +125,31 @@ export async function handleUpdateTask(
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
   }
+
+  // Security: same gate as schedule_task — adding a non-empty script must be
+  // approved, else an agent could schedule a benign task then update it to
+  // smuggle in a script. Clearing the script (null/empty) stays unguarded.
+  if (hasScript(update.script)) {
+    const agentGroup = getAgentGroup(session.agent_group_id);
+    if (!agentGroup) {
+      notifyAgent(session, 'update_task failed: agent group not found.');
+      return;
+    }
+    await requestApproval({
+      session,
+      agentName: agentGroup.name,
+      action: 'schedule_task_script',
+      payload: { op: 'update', taskId, update },
+      title: 'Scheduled Script Approval',
+      question: `Agent "${agentGroup.name}" wants to update task "${taskId}" to run a shell script:\n\n${update.script.slice(0, 500)}`,
+    });
+    notifyAgent(
+      session,
+      'update_task: adding a shell script needs admin approval before it will run. An approval request was sent.',
+    );
+    return;
+  }
+
   const touched = updateTask(inDb, taskId, update);
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
   if (touched === 0) {
