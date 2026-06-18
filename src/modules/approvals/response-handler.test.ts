@@ -121,6 +121,42 @@ describe('approval response authorization', () => {
     expect(getPendingApproval('appr-2')).toBeUndefined();
   });
 
+  it('refuses a self-approval even from an admin (separation of duties)', async () => {
+    upsertUser({ id: 'telegram:admin', kind: 'telegram', display_name: 'Admin', created_at: now() });
+    grantRole({ user_id: 'telegram:admin', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
+
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const handler = vi.fn().mockResolvedValue(undefined);
+    registerApprovalHandler('self_approve_blocked', handler);
+
+    createPendingApproval({
+      approval_id: 'appr-self',
+      session_id: 'sess-1',
+      request_id: 'appr-self',
+      action: 'self_approve_blocked',
+      payload: JSON.stringify({ packages: ['left-pad'] }),
+      created_at: now(),
+      title: 'Install packages',
+      options_json: JSON.stringify([]),
+      requester_user_id: 'telegram:admin',
+    });
+
+    const claimed = await handleApprovalsResponse({
+      questionId: 'appr-self',
+      value: 'approve',
+      userId: 'admin',
+      channelType: 'telegram',
+      platformId: 'dm-admin',
+      threadId: null,
+    });
+
+    // Claimed (we own the row) but NOT dispatched, and the row survives.
+    expect(claimed).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+    expect(getPendingApproval('appr-self')).toBeDefined();
+  });
+
   it('allows global admins to resolve approvals without a session-scoped agent group', async () => {
     upsertUser({ id: 'telegram:global-admin', kind: 'telegram', display_name: 'Global Admin', created_at: now() });
     grantRole({

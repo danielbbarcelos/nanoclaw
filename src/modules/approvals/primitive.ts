@@ -116,8 +116,14 @@ export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Prom
 /**
  * Ordered list of user IDs eligible to approve an action for the given agent
  * group. Preference: admins @ that group → global admins → owners.
+ *
+ * `excludeUserId` enforces separation of duties: the requester shouldn't also
+ * be the approver. We only drop them when at least one other approver remains —
+ * never empty the list, or a single-admin install could never get its requests
+ * approved (availability over a strict self-approval block; the click-side
+ * guard in isAuthorizedApprovalClick still refuses a self-approval).
  */
-export function pickApprover(agentGroupId: string | null): string[] {
+export function pickApprover(agentGroupId: string | null, excludeUserId?: string | null): string[] {
   const approvers: string[] = [];
   const seen = new Set<string>();
   const add = (id: string): void => {
@@ -132,6 +138,11 @@ export function pickApprover(agentGroupId: string | null): string[] {
   }
   for (const r of getGlobalAdmins()) add(r.user_id);
   for (const r of getOwners()) add(r.user_id);
+
+  if (excludeUserId) {
+    const filtered = approvers.filter((id) => id !== excludeUserId);
+    if (filtered.length > 0) return filtered;
+  }
 
   return approvers;
 }
@@ -197,6 +208,12 @@ export interface RequestApprovalOptions {
   title: string;
   /** Card body shown to the admin. */
   question: string;
+  /**
+   * User who initiated this request, when a specific human is known. Recorded
+   * on the row, excluded from approver selection, and blocked from approving
+   * their own request (separation of duties). Omit for agent-initiated requests.
+   */
+  requesterUserId?: string | null;
 }
 
 /**
@@ -206,9 +223,9 @@ export interface RequestApprovalOptions {
  * approval handler for this action via the response dispatcher.
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
-  const { session, action, payload, title, question, agentName } = opts;
+  const { session, action, payload, title, question, agentName, requesterUserId } = opts;
 
-  const approvers = pickApprover(session.agent_group_id);
+  const approvers = pickApprover(session.agent_group_id, requesterUserId);
   if (approvers.length === 0) {
     notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
     return;
@@ -235,6 +252,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     created_at: new Date().toISOString(),
     title,
     options_json: JSON.stringify(normalizedOptions),
+    requester_user_id: requesterUserId ?? null,
   });
 
   const adapter = getDeliveryAdapter();
