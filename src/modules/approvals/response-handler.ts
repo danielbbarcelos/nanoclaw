@@ -125,6 +125,13 @@ function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponseP
   const userId = namespacedUserId(payload);
   if (!userId) return false;
 
+  // Separation of duties: the requester may not approve their own request.
+  // Dormant for agent-initiated rows (requester_user_id is NULL there).
+  if (approval.requester_user_id && approval.requester_user_id === userId) {
+    log.warn('Refusing self-approval', { approvalId: approval.approval_id, userId });
+    return false;
+  }
+
   const agentGroupId =
     approval.agent_group_id ?? (approval.session_id ? getSession(approval.session_id)?.agent_group_id : null);
 

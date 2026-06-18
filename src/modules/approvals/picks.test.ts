@@ -104,6 +104,22 @@ describe('pickApprover', () => {
   it('returns empty list when nobody is privileged', () => {
     expect(pickApprover('ag-1')).toEqual([]);
   });
+
+  it('excludes the requester when other approvers remain (separation of duties)', () => {
+    seedUser('u-ga', 'telegram');
+    seedUser('u-sa', 'telegram');
+    grantRole({ user_id: 'u-ga', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
+    grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
+
+    expect(pickApprover('ag-1', 'u-sa')).toEqual(['u-ga']);
+  });
+
+  it('keeps the requester when they are the only approver (availability over strict block)', () => {
+    seedUser('u-owner', 'telegram');
+    grantRole({ user_id: 'u-owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+
+    expect(pickApprover('ag-1', 'u-owner')).toEqual(['u-owner']);
+  });
 });
 
 describe('pickApprovalDelivery', () => {

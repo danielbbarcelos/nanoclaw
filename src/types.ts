@@ -204,6 +204,8 @@ export interface PendingApproval {
   status: 'pending' | 'approved' | 'rejected' | 'expired';
   title: string;
   options_json: string;
+  /** User who initiated the request, when known. NULL for agent-initiated rows. */
+  requester_user_id: string | null;
 }
 
 // ── Agent destinations (central DB) ──
